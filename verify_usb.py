@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import struct
+import subprocess
 import zlib
 
 
@@ -30,13 +31,51 @@ def digest(entry, key):
     return value
 
 
+def decode_page(compressed, magic, expected_bytes):
+    if magic == b"OVPGZ001":
+        decoder = zlib.decompressobj()
+        try:
+            raw = decoder.decompress(compressed, expected_bytes + 1)
+        except zlib.error as error:
+            raise ValueError("invalid zlib page") from error
+        require(decoder.eof and not decoder.unconsumed_tail and
+                not decoder.unused_data and len(raw) == expected_bytes,
+                "invalid zlib page length or trailing data")
+        return raw
+
+    # Validate STREAMINFO before invoking a decoder; never resample or remix.
+    require(len(compressed) >= 42 and compressed[:4] == b"fLaC" and
+            compressed[4] & 0x7f == 0 and compressed[5:8] == b"\x00\x00\x22",
+            "invalid FLAC STREAMINFO")
+    info = int.from_bytes(compressed[18:26], "big")
+    require(info >> 44 == 96000 and (info >> 41) & 7 == 1 and
+            (info >> 36) & 31 == 15 and
+            info & ((1 << 36) - 1) == expected_bytes // 4,
+            "FLAC must be 96 kHz, stereo, 16-bit with exact page frame count")
+    try:
+        result = subprocess.run([
+            "ffmpeg", "-v", "error", "-nostdin", "-xerror", "-err_detect", "crccheck+explode",
+            "-f", "flac", "-i", "pipe:0", "-map", "0:a:0",
+            "-c:a", "pcm_s16le", "-f", "s16le",
+            "-fs", str(expected_bytes + 4), "pipe:1",
+        ], input=compressed, capture_output=True, timeout=15)
+    except FileNotFoundError as error:
+        raise ValueError("FLAC validation requires ffmpeg on PATH") from error
+    except subprocess.TimeoutExpired as error:
+        raise ValueError("FLAC page decoder timed out") from error
+    # -fs bounds output (with at most one decoded packet of overshoot).
+    require(result.returncode == 0 and len(result.stdout) == expected_bytes,
+            "invalid FLAC page or decoded length")
+    return result.stdout
+
+
 def check_role(path, entry, role, raw_bytes):
     key = role.replace("-", "_")
     with path.open("rb") as source:
         size = source.seek(0, 2)
         source.seek(0)
         header = source.read(24)
-        require(len(header) == 24 and header[:8] == b"OVPGZ001",
+        require(len(header) == 24 and header[:8] in (b"OVPGZ001", b"OVPGZ003"),
                 f"{role}: invalid header")
         page_bytes, count, total = struct.unpack(">IIQ", header[8:])
         require(page_bytes == PAGE_BYTES and total == raw_bytes and
@@ -56,20 +95,14 @@ def check_role(path, entry, role, raw_bytes):
             offset, compressed_bytes, expanded_bytes = struct.unpack_from(
                 ">QII", table, number * 48)
             expected_bytes = min(page_bytes, total - number * page_bytes)
-            require(offset == next_offset and 0 < compressed_bytes <= page_bytes * 2 and
+            limit = expected_bytes + 65536 if header[:8] == b"OVPGZ003" else page_bytes * 2
+            require(offset == next_offset and 0 < compressed_bytes <= limit and
                     expanded_bytes == expected_bytes and
                     compressed_bytes <= size - offset,
                     f"{role}: invalid page {number} bounds")
             source.seek(offset)
             compressed = source.read(compressed_bytes)
-            decoder = zlib.decompressobj()
-            try:
-                raw = decoder.decompress(compressed, expected_bytes + 1)
-            except zlib.error as error:
-                raise ValueError(f"{role}: invalid page {number} data") from error
-            require(decoder.eof and not decoder.unconsumed_tail and
-                    not decoder.unused_data and len(raw) == expected_bytes,
-                    f"{role}: invalid page {number} data")
+            raw = decode_page(compressed, header[:8], expected_bytes)
             require(hashlib.sha256(raw).digest() == table[number * 48 + 16:number * 48 + 48],
                     f"{role}: page {number} checksum mismatch")
             full_hash.update(raw)
