@@ -1,6 +1,6 @@
 # OverCue prepared-stems USB format
 
-Status: current seven-role USB layout, checked against Desktop 2.2.0/2.2.1 and OverCue firmware 0.10.1. The JSON schema string is `overcue-index/1`; a seven-role entry has `three_part: 1`. This document covers prepared media only. It does not specify how stems are separated or how a player mod is installed.
+Status: current seven-role USB layout, checked against Desktop 2.2.5 (Mac) / 2.2.6 (Windows). FLAC container support starts with OverCue firmware 0.10.0. The timing correction below was functionally confirmed on OverCue firmware 0.11.1 for the reported MP3; it does not qualify every source or hardware implementation. The JSON schema string is `overcue-index/1`; a seven-role entry has `three_part: 1`. This document covers prepared media only. It does not specify how stems are separated or how a player mod is installed.
 
 ## Directory and track identity
 
@@ -37,6 +37,7 @@ The index is UTF-8 JSON. Its relevant shape is:
       "three_part": 1,
       "page_bytes": 131072,
       "page_codec": "flac-96k",
+      "source_timing_policy": "native-mp3-header/1",
       "vocal_sha256": "<SHA-256 of expanded vocal PCM>",
       "vocal_page_table_sha256": "<SHA-256 of vocal header and page table>",
       "instrumental_sha256": "<SHA-256 of expanded instrumental PCM>",
@@ -79,7 +80,41 @@ Each file is a complete stereo selection, already prepared at **96,000 frames/se
 | `vocals-harmonics` | Vocals plus harmonics |
 | `full-mix` | Prepared copy of the original full mix |
 
-The writer resamples, applies a common headroom gain and any downward loudness trims, and prepends silence to account for source encoder delay. It then pads roles to equal length. These processing choices affect the bytes and are already reflected in the indexed hashes; a reader must play the stored PCM rather than reconstructing combinations. `overcue-manifest.json` records `runtime.latency_pad_frames`, the source codec/rate, and per-role metadata for diagnostics. The pad describes the writer's source timing, **not** a universal player latency offset. A hardware implementation must align the 96 kHz sidecars with its own full-mix decode and test seeks, loops, tempo changes, and fallback before claiming audio compatibility.
+The writer resamples, applies a common headroom gain and any downward loudness trims, and prepends silence to restore source time omitted during decoding, including declared encoder delay and a skipped initial MP3 metadata frame. It then pads roles to equal length. These processing choices affect the bytes and are already reflected in the indexed hashes; a reader must play the stored PCM rather than reconstructing combinations. `overcue-manifest.json` records `runtime.latency_pad_frames`, the source codec/rate, and per-role metadata for diagnostics. The pad describes the writer's source timing, **not** a universal player latency offset. A hardware implementation must align the 96 kHz sidecars with its own full-mix decode and test seeks, loops, tempo changes, and fallback before claiming audio compatibility.
+
+### Source timing and regeneration
+
+Desktop 2.2.5 (Mac) / 2.2.6 (Windows) record
+`source_timing_policy: "native-mp3-header/1"` in each index entry and
+`runtime.source_timing_policy` in `overcue-manifest.json`. This is additional
+metadata, not a new index schema or page-container version. Older readers can
+ignore it for byte decoding; a missing or unknown value does not establish
+whether a bank matches the native player's source timeline. The policy is
+recorded for newly prepared banks across source formats, not only MP3s.
+
+For affected MP3s, Symphonia 0.5.5 omits an initial Info/Xing/VBRI metadata
+MPEG frame that the native player retains on its timeline. The corrected writer
+restores that frame's actual duration, in addition to any declared encoder delay
+trimmed by the decoder, before conversion to the common 96 kHz timeline. It
+applies the same leading silence to all seven roles, including the prepared full
+mix. It does not add an assumed MP3 delay to untagged audio that already retains
+its leading samples. `runtime.latency_pad_frames` counts the total leading
+silence in **96 kHz stereo frames**, not source-rate frames or milliseconds.
+
+Old banks missing the current policy are marked **Needs regeneration** when the
+original source is affected. Unaffected source formats and untagged MP3s do not
+require regeneration solely because this field is absent. If the app cannot
+inspect a source, it does not trust the old bank for reuse. Affected old banks
+are refused by copy/reuse/repack; select **Regenerate & Package on USB** to
+replace them. Updating the app alone does not rewrite prepared media, and
+repacking the old PCM cannot repair its timeline.
+
+Equal role lengths and passing hashes establish bank consistency, not native
+full-mix alignment. The reference validator checks the indexed bytes; it does
+not measure playback timing or determine whether an old MP3 bank needs
+regeneration. Third-party hardware must independently compare its own native
+source decode with the prepared timeline; this policy is not a universal
+latency adjustment to apply again at playback.
 
 Newly generated bundles use the first 16 lowercase hexadecimal characters of
 SHA-256 of this UTF-8 string:

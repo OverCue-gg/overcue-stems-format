@@ -23,6 +23,19 @@ not one ordinary `.flac` song file. Repacking preserves the exact prepared PCM
 without running stem separation again. Our test library used about 66% less
 stem storage; savings vary by track.
 
+Desktop **2.2.5 (Mac) / 2.2.6 (Windows)** correct the prepared timeline for
+MP3s whose initial Info/Xing/VBRI metadata frame was skipped during decoding.
+New banks record `source_timing_policy: native-mp3-header/1`. The seven-role
+layout, index schema and page containers are unchanged, so existing readers
+can still decode the files. See [source timing](FORMAT.md#source-timing-and-regeneration)
+for the metadata and hardware-alignment requirements.
+
+Older affected banks appear as **Needs regeneration** in the app. Select them
+and use **Regenerate & Package on USB** to apply the correction. Repacking only
+changes compression and preserves the old timing; updating the app does not
+rewrite existing banks. The byte-level validator checks file integrity, not
+alignment with a player's native full-mix playback.
+
 Use the exact media path shown in `/CDJMODS/index.json`. A player with different library IDs can match that path to its loaded track. If its paths differ, the integration must establish an equally reliable mapping before enabling stems.
 
 OverCue Desktop currently prepares USBs containing a Rekordbox `PIONEER/rekordbox/export.pdb` export. Other hardware can consume the resulting `/CDJMODS` data when it can access that USB and identify the matching loaded song; preparing an arbitrary non-Rekordbox USB is not yet an app feature.
